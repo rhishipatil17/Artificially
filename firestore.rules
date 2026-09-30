@@ -1,0 +1,66 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function validListing(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() <= 120
+        && data.category is string
+        && data.area is string && data.area.size() > 0
+        && data.city is string && data.city.size() > 0
+        && data.locationKeywords is list
+        && data.extraFields is list && data.extraFields.size() <= 30;
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /listings/{listingId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.ratingSum == 0
+        && request.resource.data.ratingCount == 0
+        && validListing(request.resource.data);
+
+      // Owners edit their listing but can't change ownership or rating totals.
+      allow update: if signedIn()
+        && resource.data.ownerId == request.auth.uid
+        && !request.resource.data.diff(resource.data).affectedKeys()
+             .hasAny(['ownerId', 'ratingSum', 'ratingCount', 'createdAt'])
+        && validListing(request.resource.data);
+
+      // Reviewers may only touch rating totals, in the same batch as their own review.
+      allow update: if signedIn()
+        && resource.data.ownerId != request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ratingSum', 'ratingCount'])
+        && (request.resource.data.ratingCount - resource.data.ratingCount) in [-1, 0, 1]
+        && request.resource.data.ratingSum - resource.data.ratingSum >= -5
+        && request.resource.data.ratingSum - resource.data.ratingSum <= 5
+        && (existsAfter(/databases/$(database)/documents/listings/$(listingId)/reviews/$(request.auth.uid))
+            || exists(/databases/$(database)/documents/listings/$(listingId)/reviews/$(request.auth.uid)));
+
+      allow delete: if signedIn() && resource.data.ownerId == request.auth.uid;
+
+      match /reviews/{reviewerId} {
+        allow read: if signedIn();
+
+        allow create, update: if signedIn()
+          && reviewerId == request.auth.uid
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.rating is int
+          && request.resource.data.rating >= 1 && request.resource.data.rating <= 5
+          && request.resource.data.comment is string && request.resource.data.comment.size() <= 2000
+          && get(/databases/$(database)/documents/listings/$(listingId)).data.ownerId != request.auth.uid;
+
+        allow delete: if signedIn() && reviewerId == request.auth.uid;
+      }
+    }
+  }
+}
